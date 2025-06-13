@@ -171,7 +171,7 @@ jobs:
               -e EDGAR_API_KEY \
               -e EDGAR_CLOUD_API_URL \
               -e EDGAR_PROJECT_ID \
-              -e EDGAR_CHILD_PIPELINE_ID" \
+              -e EDGAR_CHILD_PIPELINE_ID \
               -w /app \
               ghcr.io/m1kc3b/edgar-cli:latest \
               --json mark \
