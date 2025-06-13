@@ -1,0 +1,7 @@
+/node_modules
+.env
+/artifacts
+/cache
+sbom.json
+test-report.json
+deploy-report.json
