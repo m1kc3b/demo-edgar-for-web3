@@ -5,3 +5,4 @@
 sbom.json
 test-report.json
 deploy-report.json
+package-lock.json
