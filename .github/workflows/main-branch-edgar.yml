@@ -51,7 +51,7 @@ jobs:
             ghcr.io/m1kc3b/edgar-cli:latest \
             --json get-latest-ledger-info 2>&1 || true)
 
-          BLOCK_HASH=$(echo "$PROJECT_GENESIS_INFO" | jq -r '.lastBlockHash // empty' || true)
+          BLOCK_HASH=$(echo "$PROJECT_GENESIS_INFO" | jq -r '.last_block_hash // empty' || true)
 
           if [ -z "$BLOCK_HASH" ]; then
             echo "::notice::Edgar project ledger '${{ env.EDGAR_PROJECT_ID }}' does NOT exist. Will initialize."
