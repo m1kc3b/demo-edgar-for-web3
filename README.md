@@ -42,6 +42,13 @@ Dans l'écosystème Web3, la transparence et la vérifiabilité des contrats int
 
   - **Transparence** : Rend le processus de développement et de déploiement plus transparent pour les parties prenantes.
 
+Pour consulter le ledger désérialisé [cliquez ici](https://edgar-worker-backend-rust.cebulski-mi.workers.dev/api/v1/list-projects/demo-edgar-for-web3)
+
+Voici les publications sur Pinata:
+- Le merge de la PR: [demo-edgar-for-web3-main-pipeline](https://copper-official-frog-380.mypinata.cloud/ipfs/QmTP9gZXk5suPdTbGpUoLMzh17FfR97pZ1mZNcZQMNiuPP)
+- La Pull Request: [demo-edgar-for-web3-remove-greetings-](https://copper-official-frog-380.mypinata.cloud/ipfs/QmRoEFz1UcPs5sTbHogYJnLM6dvMuzSx3GUuTUC98DriHn)
+- Le first commit: [demo-edgar-for-web3-main-pipeline](https://copper-official-frog-380.mypinata.cloud/ipfs/QmdXM8eGxtMbgt9uKtfere2fHtCEm87emxXUHaoLuW8G32)
+
 ## Structure du Dépôt
   - `contracts/` : Contient les contrats Solidity (ex: Counter.sol).
 
@@ -52,3 +59,4 @@ Dans l'écosystème Web3, la transparence et la vérifiabilité des contrats int
   - `.github/workflows/` : Les définitions des workflows GitHub Actions (main-branch-edgar.yml et feature-pr-edgar.yml).
 
 Ce projet fournit un modèle robuste pour intégrer une traçabilité cryptographique avancée dans vos pipelines de développement Web3, essentielle pour construire des applications décentralisées fiables et auditable.
+
