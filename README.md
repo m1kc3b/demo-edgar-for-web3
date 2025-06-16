@@ -42,12 +42,6 @@ Dans l'écosystème Web3, la transparence et la vérifiabilité des contrats int
 
   - **Transparence** : Rend le processus de développement et de déploiement plus transparent pour les parties prenantes.
 
-Pour consulter le ledger désérialisé [cliquez ici](https://edgar-worker-backend-rust.cebulski-mi.workers.dev/api/v1/list-projects/demo-edgar-for-web3)
-
-Voici les publications sur Pinata:
-- Le merge de la PR: [demo-edgar-for-web3-main-pipeline](https://copper-official-frog-380.mypinata.cloud/ipfs/QmTP9gZXk5suPdTbGpUoLMzh17FfR97pZ1mZNcZQMNiuPP)
-- La Pull Request: [demo-edgar-for-web3-remove-greetings-](https://copper-official-frog-380.mypinata.cloud/ipfs/QmRoEFz1UcPs5sTbHogYJnLM6dvMuzSx3GUuTUC98DriHn)
-- Le first commit: [demo-edgar-for-web3-main-pipeline](https://copper-official-frog-380.mypinata.cloud/ipfs/QmdXM8eGxtMbgt9uKtfere2fHtCEm87emxXUHaoLuW8G32)
 
 ## Structure du Dépôt
   - `contracts/` : Contient les contrats Solidity (ex: Counter.sol).
@@ -60,3 +54,34 @@ Voici les publications sur Pinata:
 
 Ce projet fournit un modèle robuste pour intégrer une traçabilité cryptographique avancée dans vos pipelines de développement Web3, essentielle pour construire des applications décentralisées fiables et auditable.
 
+## Scénario de Démonstration
+Ce dépôt illustre un scénario de développement typique en trois étapes, avec une traçabilité complète assurée par Edgar :
+
+1) **Initialisation du Projet & Premier Commit** :
+
+  - Un projet web3 basique est initialisé.
+
+  - Le tout premier commit est effectué, marquant les artefacts initiaux dans le `main-pipeline` d'Edgar.
+
+  - Publication Pinata correspondante : [demo-edgar-for-web3-main-pipeline (First Commit)](https://copper-official-frog-380.mypinata.cloud/ipfs/QmdXM8eGxtMbgt9uKtfere2fHtCEm87emxXUHaoLuW8G32)
+
+2) **Développement via Pull Request (PR)** :
+
+  - Une Pull Request est ouverte (simulant une modification du contrat, par exemple l'ajout d'une fonction `greetings`).
+
+  - Un `child-ledger` dédié est créé pour cette PR, s'ancrant au `last-block-hash` du `main-pipeline` au moment de la création de la PR. Toutes les actions (compilation, tests) effectuées dans le cadre de cette PR sont tracées dans ce child ledger.
+
+  - Publication Pinata correspondante : [demo-edgar-for-web3-remove-greetings- (Pull Request)](https://copper-official-frog-380.mypinata.cloud/ipfs/QmRoEFz1UcPs5sTbHogYJnLM6dvMuzSx3GUuTUC98DriHn)
+
+3) **Fusion de la Pull Request** :
+
+  - Après validation, la Pull Request est fusionnée dans la branche `main`.
+
+  - Les artefacts finaux du `main-pipeline` sont mis à jour et publiés, incluant les modifications apportées par la PR.
+
+  - Publication Pinata correspondante : [demo-edgar-for-web3-main-pipeline (Merge PR)](https://copper-official-frog-380.mypinata.cloud/ipfs/QmTP9gZXk5suPdTbGpUoLMzh17FfR97pZ1mZNcZQMNiuPP)
+
+**Consultez le Ledger Désérialisé** :
+
+Vous pouvez explorer l'intégralité du ledger désérialisé de ce projet en cliquant ici :
+[Voir le Ledger Complet](https://edgar-worker-backend-rust.cebulski-mi.workers.dev/api/v1/list-projects/demo-edgar-for-web3)
