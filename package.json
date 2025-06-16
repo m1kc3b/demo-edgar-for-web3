@@ -1,0 +1,22 @@
+{
+  "name": "edgar-web3-counter",
+  "version": "1.0.0",
+  "description": "A minimal Hardhat project for Edgar Web3 CI/CD demo.",
+  "main": "index.js",
+  "scripts": {
+    "test": "npx hardhat test",
+    "compile": "npx hardhat compile",
+    "deploy": "npx hardhat run scripts/deploy.js",
+    "sbom": "cyclonedx-npm --output-file sbom.json"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@cyclonedx/cyclonedx-npm": "^3.0.0",
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "ethers": "^6.10.0",
+    "hardhat": "^2.19.4"
+  }
+}
+

@@ -1,0 +1,456 @@
+name: Main Branch CI/CD & Deployment with Edgar
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'contracts/**'
+      - 'scripts/**'
+      - 'test/**'
+      - 'package.json'
+      - 'package-lock.json'
+
+jobs:
+  main-build-and-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      EDGAR_PROJECT_ID: ${{ secrets.EDGAR_PROJECT_ID }}
+      EDGAR_PIPELINE_ID: main-pipeline
+      EDGAR_KEY_PASSWORD: ${{ secrets.EDGAR_KEY_PASSWORD }}
+      EDGAR_API_KEY: ${{ secrets.EDGAR_API_KEY }}
+      EDGAR_CLOUD_API_URL: ${{ secrets.EDGAR_CLOUD_API_URL }}
+      SIGNING_KEY_FILE: /tmp/edgar_signing_key.bin
+      PROJECT_NAME: edgar-web3-counter
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Authenticate with GitHub Container Registry
+        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Install JQ
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Decode Edgar Signing Key
+        run: echo "${{ secrets.EDGAR_SIGNING_KEY_B64 }}" | base64 --decode > ${{ env.SIGNING_KEY_FILE }}
+        shell: bash
+
+      - name: Check Edgar Project Ledger Existence
+        id: check_project_ledger
+        run: |
+          echo "Checking if Edgar project ledger '${{ env.EDGAR_PROJECT_ID }}' exists..."
+          PROJECT_GENESIS_INFO=$(docker run --rm \
+            -e EDGAR_API_KEY \
+            -e EDGAR_CLOUD_API_URL \
+            -e EDGAR_PROJECT_ID \
+            ghcr.io/m1kc3b/edgar-cli:latest \
+            --json get-latest-ledger-info 2>&1 || true)
+
+          BLOCK_HASH=$(echo "$PROJECT_GENESIS_INFO" | jq -r '.last_block_hash // empty' || true)
+
+          if [ -z "$BLOCK_HASH" ]; then
+            echo "::notice::Edgar project ledger '${{ env.EDGAR_PROJECT_ID }}' does NOT exist. Will initialize."
+            echo "project_ledger_exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Edgar project ledger '${{ env.EDGAR_PROJECT_ID }}' already exists with genesis block: $BLOCK_HASH"
+            echo "project_ledger_exists=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+
+      - name: Initialize Edgar Project Ledger (if not exists)
+        if: steps.check_project_ledger.outputs.project_ledger_exists == 'false'
+        run: |
+          echo "Initializing Edgar project ledger for '${{ env.EDGAR_PROJECT_ID }}'..."
+          docker run --rm \
+            -v /tmp:/tmp \
+            -e EDGAR_KEY_PASSWORD \
+            -e EDGAR_API_KEY \
+            -e EDGAR_CLOUD_API_URL \
+            -e EDGAR_PROJECT_ID \
+            ghcr.io/m1kc3b/edgar-cli:latest \
+            --json init-project-ledger \
+              --project-name "${{ env.EDGAR_PROJECT_ID }}" \
+              --message "Initial genesis block for ${{ env.EDGAR_PROJECT_ID }}"
+          echo "Edgar project ledger initialized."
+        env:
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_KEY_PASSWORD: ${{ env.EDGAR_KEY_PASSWORD }}
+          SIGNING_KEY_FILE: ${{ env.SIGNING_KEY_FILE }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install Hardhat Dependencies
+        run: HUSKY=0 npm ci
+        working-directory: .
+
+      - name: Get Changed Contract Files (for marking source)
+        id: changed_files_source
+        run: |
+          CHANGED_CONTRACTS=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '^contracts/' || true)
+          CHANGED_SCRIPTS=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '^scripts/' || true)
+          CHANGED_TESTS=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '^test/' || true)
+
+          echo "contracts<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED_CONTRACTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "scripts<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED_SCRIPTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "tests<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED_TESTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Mark Changed Source Code, Scripts, and Tests (CodeSource)
+        if: steps.changed_files_source.outputs.contracts != '' || steps.changed_files_source.outputs.scripts != '' || steps.changed_files_source.outputs.tests != ''
+        env:
+          EDGAR_KEY_PASSWORD: ${{ env.EDGAR_KEY_PASSWORD }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_PIPELINE_ID: ${{ env.EDGAR_PIPELINE_ID }}
+          SIGNING_KEY_FILE: ${{ env.SIGNING_KEY_FILE }}
+        run: |
+          # Marquage des contrats modifiés
+          if [ -n "${{ steps.changed_files_source.outputs.contracts }}" ]; then
+            echo "${{ steps.changed_files_source.outputs.contracts }}" | while IFS= read -r file_path; do
+              if [ -n "$file_path" ]; then
+                echo "Marking contract source: $file_path"
+                docker run --rm \
+                  -v ${{ github.workspace }}:/app \
+                  -v /tmp:/tmp \
+                  -e EDGAR_KEY_PASSWORD \
+                  -e EDGAR_API_KEY \
+                  -e EDGAR_CLOUD_API_URL \
+                  -e EDGAR_PROJECT_ID \
+                  -e EDGAR_PIPELINE_ID \
+                  -w /app \
+                  ghcr.io/m1kc3b/edgar-cli:latest \
+                  --json mark \
+                    --project-id "$EDGAR_PROJECT_ID" \
+                    --pipeline-id "$EDGAR_PIPELINE_ID" \
+                    --artifact "/app/$file_path" \
+                    --message "Code source merged - $file_path - commit ${{ github.sha }}" \
+                    --payload-type CodeSource \
+                    --key-path "/tmp/edgar_signing_key.bin" \
+                    --password "$EDGAR_KEY_PASSWORD"
+              fi
+            done
+          fi
+
+          # Marquage des scripts modifiés
+          if [ -n "${{ steps.changed_files_source.outputs.scripts }}" ]; then
+            echo "${{ steps.changed_files_source.outputs.scripts }}" | while IFS= read -r file_path; do
+              if [ -n "$file_path" ]; then
+                echo "Marking script source: $file_path"
+                docker run --rm \
+                  -v ${{ github.workspace }}:/app \
+                  -v /tmp:/tmp \
+                  -e EDGAR_KEY_PASSWORD \
+                  -e EDGAR_API_KEY \
+                  -e EDGAR_CLOUD_API_URL \
+                  -e EDGAR_PROJECT_ID \
+                  -e EDGAR_PIPELINE_ID \
+                  -w /app \
+                  ghcr.io/m1kc3b/edgar-cli:latest \
+                  --json mark \
+                    --project-id "$EDGAR_PROJECT_ID" \
+                    --pipeline-id "$EDGAR_PIPELINE_ID" \
+                    --artifact "/app/$file_path" \
+                    --message "Script merged - $file_path - commit ${{ github.sha }}" \
+                    --payload-type CodeSource \
+                    --key-path "/tmp/edgar_signing_key.bin" \
+                    --password "$EDGAR_KEY_PASSWORD"
+              fi
+            done
+          fi
+
+          # Marquage des tests modifiés
+          if [ -n "${{ steps.changed_files_source.outputs.tests }}" ]; then
+            echo "${{ steps.changed_files_source.outputs.tests }}" | while IFS= read -r file_path; do
+              if [ -n "$file_path" ]; then
+                echo "Marking test source: $file_path"
+                docker run --rm \
+                  -v ${{ github.workspace }}:/app \
+                  -v /tmp:/tmp \
+                  -e EDGAR_KEY_PASSWORD \
+                  -e EDGAR_API_KEY \
+                  -e EDGAR_CLOUD_API_URL \
+                  -e EDGAR_PROJECT_ID \
+                  -e EDGAR_PIPELINE_ID \
+                  -w /app \
+                  ghcr.io/m1kc3b/edgar-cli:latest \
+                  --json mark \
+                    --project-id "$EDGAR_PROJECT_ID" \
+                    --pipeline-id "$EDGAR_PIPELINE_ID" \
+                    --artifact "/app/$file_path" \
+                    --message "Test file merged - $file_path - commit ${{ github.sha }}" \
+                    --payload-type CodeSource \
+                    --key-path "/tmp/edgar_signing_key.bin" \
+                    --password "$EDGAR_KEY_PASSWORD"
+              fi
+            done
+          fi
+
+          echo "All relevant source files marked on main ledger."
+
+      - name: Compile Contracts
+        run: npm run compile
+        working-directory: .
+
+      - name: Get Last Bytecode Hash from Edgar
+        id: get_last_bytecode_hash
+        run: |
+          echo "Attempting to get last 'Bytecode' block hash for '${{ env.EDGAR_PIPELINE_ID }}'..."
+          LAST_BYTECODE_INFO=$(docker run --rm \
+            -e EDGAR_API_KEY \
+            -e EDGAR_CLOUD_API_URL \
+            -e EDGAR_PROJECT_ID \
+            -e EDGAR_PIPELINE_ID \
+            ghcr.io/m1kc3b/edgar-cli:latest \
+            --json get-latest-ledger-info \
+              --payload-type Bytecode)
+
+          LAST_BYTECODE_HASH=$(echo "$LAST_BYTECODE_INFO" | jq -r '.data.block_hash // empty')
+          
+          if [ -z "$LAST_BYTECODE_HASH" ]; then
+            echo "::warning::No previous 'Bytecode' hash found for main pipeline. Skipping verification against previous version."
+            echo "LAST_BYTECODE_BLOCK_HASH=" >> "$GITHUB_ENV"
+          else
+            echo "Last 'Bytecode' block hash: $LAST_BYTECODE_HASH"
+            echo "LAST_BYTECODE_BLOCK_HASH=$LAST_BYTECODE_HASH" >> "$GITHUB_ENV"
+          fi
+        env:
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_PIPELINE_ID: ${{ env.EDGAR_PIPELINE_ID }}
+
+      - name: Verify Compiled Bytecode with Edgar
+        if: env.LAST_BYTECODE_BLOCK_HASH != ''
+        env:
+          EDGAR_KEY_PASSWORD: ${{ env.EDGAR_KEY_PASSWORD }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_PIPELINE_ID: ${{ env.EDGAR_PIPELINE_ID }}
+          SIGNING_KEY_FILE: ${{ env.SIGNING_KEY_FILE }}
+        run: |
+          COMPILED_BYTECODE_PATH="./artifacts/contracts/Counter.sol/Counter.json"
+          if [ -f "$COMPILED_BYTECODE_PATH" ]; then
+            echo "Verifying compiled bytecode: $COMPILED_BYTECODE_PATH against $LAST_BYTECODE_BLOCK_HASH"
+            docker run --rm \
+              -v ${{ github.workspace }}:/app \
+              -e EDGAR_API_KEY \
+              -e EDGAR_CLOUD_API_URL \
+              -e EDGAR_PROJECT_ID \
+              -e EDGAR_PIPELINE_ID \
+              -w /app \
+              ghcr.io/m1kc3b/edgar-cli:latest \
+              --json check \
+                --artifact "/app/$COMPILED_BYTECODE_PATH" \
+                --against-ledger-entry "$LAST_BYTECODE_BLOCK_HASH" \
+                || { echo "Bytecode verification FAILED! Bytecode has changed (or is corrupt)."; exit 1; }
+            echo "Bytecode verification PASSED. (Content matches previous version)"
+          else
+            echo "Compiled bytecode file $COMPILED_BYTECODE_PATH not found, skipping verification."
+            exit 1
+          fi
+        working-directory: .
+
+      - name: Mark Compiled Bytecode
+        env:
+          EDGAR_KEY_PASSWORD: ${{ env.EDGAR_KEY_PASSWORD }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_PIPELINE_ID: ${{ env.EDGAR_PIPELINE_ID }}
+          SIGNING_KEY_FILE: ${{ env.SIGNING_KEY_FILE }}
+        run: |
+          COMPILED_BYTECODE_PATH="./artifacts/contracts/Counter.sol/Counter.json"
+          if [ -f "$COMPILED_BYTECODE_PATH" ]; then
+            echo "Marking compiled bytecode: $COMPILED_BYTECODE_PATH"
+            docker run --rm \
+              -v ${{ github.workspace }}:/app \
+              -v /tmp:/tmp \
+              -e EDGAR_KEY_PASSWORD \
+              -e EDGAR_API_KEY \
+              -e EDGAR_CLOUD_API_URL \
+              -e EDGAR_PROJECT_ID \
+              -e EDGAR_PIPELINE_ID \
+              -w /app \
+              ghcr.io/m1kc3b/edgar-cli:latest \
+              --json mark \
+                --project-id "$EDGAR_PROJECT_ID" \
+                --pipeline-id "$EDGAR_PIPELINE_ID" \
+                --artifact "/app/$COMPILED_BYTECODE_PATH" \
+                --message "Compiled bytecode for commit ${{ github.sha }}" \
+                --payload-type Bytecode \
+                --key-path "/tmp/edgar_signing_key.bin" \
+                --password "$EDGAR_KEY_PASSWORD"
+          else
+            echo "Compiled bytecode file $COMPILED_BYTECODE_PATH not found, skipping mark step."
+            exit 1
+          fi
+        working-directory: .
+
+      - name: Run Unit Tests
+        run: npm run test
+        working-directory: .
+
+      - name: Mark Test Results
+        env:
+          EDGAR_KEY_PASSWORD: ${{ env.EDGAR_KEY_PASSWORD }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_PIPELINE_ID: ${{ env.EDGAR_PIPELINE_ID }}
+          SIGNING_KEY_FILE: ${{ env.SIGNING_KEY_FILE }}
+        run: |
+          TEST_REPORT_FILE="test_results_commit_${{ github.sha }}.txt"
+          echo "Tests for commit ${{ github.sha }} passed." > "$TEST_REPORT_FILE"
+          
+          echo "Marking test results: $TEST_REPORT_FILE"
+          docker run --rm \
+            -v ${{ github.workspace }}:/app \
+            -v /tmp:/tmp \
+            -e EDGAR_KEY_PASSWORD \
+            -e EDGAR_API_KEY \
+            -e EDGAR_CLOUD_API_URL \
+            -e EDGAR_PROJECT_ID \
+            -e EDGAR_PIPELINE_ID \
+            -w /app \
+            ghcr.io/m1kc3b/edgar-cli:latest \
+            --json mark \
+              --project-id "$EDGAR_PROJECT_ID" \
+              --pipeline-id "$EDGAR_PIPELINE_ID" \
+              --artifact "/app/$TEST_REPORT_FILE" \
+              --message "Unit tests passed for commit ${{ github.sha }}" \
+              --payload-type TestResult \
+              --key-path "/tmp/edgar_signing_key.bin" \
+              --password "$EDGAR_KEY_PASSWORD"
+        working-directory: .
+
+      - name: Run Deployment
+        run: npm run deploy
+        working-directory: .
+
+      - name: Mark Deployment
+        env:
+          EDGAR_KEY_PASSWORD: ${{ env.EDGAR_KEY_PASSWORD }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_PIPELINE_ID: ${{ env.EDGAR_PIPELINE_ID }}
+          SIGNING_KEY_FILE: ${{ env.SIGNING_KEY_FILE }}
+        run: |
+          DEPLOYMENT_REPORT_FILE="deployment_report_commit_${{ github.sha }}.txt"
+          CONTRACT_ADDRESS="0x$(head /dev/urandom | tr -dc A-Fa-f0-9 | head -c 40)" 
+          echo "Contract Counter deployed to: $CONTRACT_ADDRESS" > "$DEPLOYMENT_REPORT_FILE"
+
+          echo "Marking deployment: $DEPLOYMENT_REPORT_FILE"
+          docker run --rm \
+            -v ${{ github.workspace }}:/app \
+            -v /tmp:/tmp \
+            -e EDGAR_KEY_PASSWORD \
+            -e EDGAR_API_KEY \
+            -e EDGAR_CLOUD_API_URL \
+            -e EDGAR_PROJECT_ID \
+            -e EDGAR_PIPELINE_ID \
+            -w /app \
+            ghcr.io/m1kc3b/edgar-cli:latest \
+            --json mark \
+              --project-id "$EDGAR_PROJECT_ID" \
+              --pipeline-id "$EDGAR_PIPELINE_ID" \
+              --artifact "/app/$DEPLOYMENT_REPORT_FILE" \
+              --message "Deployment to (simulated) blockchain for commit ${{ github.sha }}" \
+              --payload-type Deployment \
+              --key-path "/tmp/edgar_signing_key.bin" \
+              --password "$EDGAR_KEY_PASSWORD"
+        working-directory: .
+
+      - name: Generate SBOM (using npm run sbom)
+        run: npm run sbom
+        working-directory: .
+
+      - name: Mark SBOM
+        env:
+          EDGAR_KEY_PASSWORD: ${{ env.EDGAR_KEY_PASSWORD }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_PIPELINE_ID: ${{ env.EDGAR_PIPELINE_ID }}
+          SIGNING_KEY_FILE: ${{ env.SIGNING_KEY_FILE }}
+        run: |
+          if [ -f "sbom.json" ]; then
+            echo "Marking SBOM: sbom.json"
+            docker run --rm \
+              -v ${{ github.workspace }}:/app \
+              -v /tmp:/tmp \
+              -e EDGAR_KEY_PASSWORD \
+              -e EDGAR_API_KEY \
+              -e EDGAR_CLOUD_API_URL \
+              -e EDGAR_PROJECT_ID \
+              -e EDGAR_PIPELINE_ID \
+              -w /app \
+              ghcr.io/m1kc3b/edgar-cli:latest \
+              --json mark \
+                --project-id "$EDGAR_PROJECT_ID" \
+                --pipeline-id "$EDGAR_PIPELINE_ID" \
+                --artifact "/app/sbom.json" \
+                --message "SBOM for Counter.sol commit ${{ github.sha }}" \
+                --payload-type SBOM \
+                --key-path "/tmp/edgar_signing_key.bin" \
+                --password "$EDGAR_KEY_PASSWORD"
+          else
+            echo "SBOM file not found, skipping mark step."
+            exit 1
+          fi
+        working-directory: .
+
+      - name: Publish Edgar Ledger to SaaS & IPFS
+        env:
+          EDGAR_KEY_PASSWORD: ${{ env.EDGAR_KEY_PASSWORD }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_PIPELINE_ID: ${{ env.EDGAR_PIPELINE_ID }}
+          SIGNING_KEY_FILE: ${{ env.SIGNING_KEY_FILE }}
+        run: |
+          echo "Publishing Edgar ledger for pipeline '${{ env.EDGAR_PIPELINE_ID }}' to SaaS & IPFS..."
+          docker run --rm \
+            -v ${{ github.workspace }}:/app \
+            -e EDGAR_API_KEY \
+            -e EDGAR_CLOUD_API_URL \
+            -e EDGAR_PROJECT_ID \
+            -e EDGAR_PIPELINE_ID \
+            -w /app \
+            ghcr.io/m1kc3b/edgar-cli:latest \
+            --json publish
+          echo "Main ledger published successfully."
+
+      - name: Cleanup Edgar Signing Key
+        if: always()
+        run: |
+          rm -f ${{ env.SIGNING_KEY_FILE }}
+          echo "Cleaned up temporary signing key file."
+
+
+
+
+
+

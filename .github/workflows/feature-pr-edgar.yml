@@ -1,0 +1,249 @@
+name: Feature Branch CI with Edgar Child Ledger
+
+on:
+  pull_request:
+    branches:
+      - master
+    types: [opened, synchronize, reopened]
+
+jobs:
+  feature-build-and-trace:
+    runs-on: ubuntu-latest
+
+    env:
+      EDGAR_PROJECT_ID: ${{ secrets.EDGAR_PROJECT_ID }}
+      EDGAR_KEY_PASSWORD: ${{ secrets.EDGAR_KEY_PASSWORD }}
+      EDGAR_API_KEY: ${{ secrets.EDGAR_API_KEY }}
+      EDGAR_CLOUD_API_URL: ${{ secrets.EDGAR_CLOUD_API_URL }}
+      SIGNING_KEY_FILE: /tmp/edgar_signing_key.bin
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Authenticate with GitHub Container Registry
+        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Install JQ
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Decode Edgar Signing Key
+        run: echo "${{ secrets.EDGAR_SIGNING_KEY_B64 }}" | base64 --decode > ${{ env.SIGNING_KEY_FILE }}
+        shell: bash
+
+      - name: Get Latest Main Pipeline Block Hash
+        id: get_main_hash
+        run: |
+          echo "Getting latest block hash from main-pipeline..."
+          MAIN_LAST_BLOCK_INFO=$(docker run --rm \
+            -e EDGAR_API_KEY \
+            -e EDGAR_CLOUD_API_URL \
+            -e EDGAR_PROJECT_ID \
+            -e EDGAR_PIPELINE_ID="main-pipeline" \
+            ghcr.io/m1kc3b/edgar-cli:latest \
+            --json get-latest-ledger-info)
+
+          MAIN_LAST_BLOCK_HASH=$(echo "$MAIN_LAST_BLOCK_INFO" | jq -r '.last_block_hash // empty')
+
+          if [ -z "$MAIN_LAST_BLOCK_HASH" ]; then
+            echo "::warning::No block found on main-pipeline, child ledger will not be linked."
+            echo "MAIN_LAST_BLOCK_HASH=" >> "$GITHUB_OUTPUT"
+          else
+            echo "MAIN_LAST_BLOCK_HASH=$MAIN_LAST_BLOCK_HASH" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install Hardhat Dependencies
+        run: HUSKY=0 npm ci
+        working-directory: .
+
+      - name: Init Edgar Child Ledger
+        id: init_child_ledger
+        run: |
+          CHILD_PIPELINE_ID="${{ github.head_ref }}-PR-${{ github.event.pull_request.number }}-pipeline"
+          echo "Child pipeline ID: $CHILD_PIPELINE_ID"
+          
+          INIT_CMD_ARGS=(
+            "--json"
+            "init-child-ledger"
+            "--project-id" "$EDGAR_PROJECT_ID"
+            "--child-ledger-name" "$CHILD_PIPELINE_ID"
+            "--message" "Child ledger for PR #${{ github.event.pull_request.number }} - Branch ${{ github.head_ref }}"
+          )
+
+          # Ajout conditionnel des arguments de liaison parent
+          if [ -n "${{ steps.get_main_hash.outputs.MAIN_LAST_BLOCK_HASH }}" ]; then
+            INIT_CMD_ARGS+=(
+              "--parent-pipeline-id" "main-pipeline"
+              "--parent-block-hash" "${{ steps.get_main_hash.outputs.MAIN_LAST_BLOCK_HASH }}"
+            )
+          fi
+
+          docker run --rm \
+            -v /tmp:/tmp \
+            -e EDGAR_KEY_PASSWORD \
+            -e EDGAR_API_KEY \
+            -e EDGAR_CLOUD_API_URL \
+            -e EDGAR_PROJECT_ID \
+            ghcr.io/m1kc3b/edgar-cli:latest \
+            "${INIT_CMD_ARGS[@]}" || { echo 'Failed to initialize child ledger. Check backend logs.'; exit 1; }
+            
+          echo "EDGAR_CHILD_PIPELINE_ID=$CHILD_PIPELINE_ID" >> $GITHUB_ENV
+        env:
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_KEY_PASSWORD: ${{ env.EDGAR_KEY_PASSWORD }} # nécessaire pour la signature interne
+          SIGNING_KEY_FILE: ${{ env.SIGNING_KEY_FILE }} # nécessaire pour la signature interne
+
+      - name: Get Changed Contract Files
+        id: changed_files_source
+        run: |
+          CHANGED_CONTRACTS=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '^contracts/' || true)
+          echo "contracts<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED_CONTRACTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Mark Changed Contract Files (Child Ledger)
+        if: steps.changed_files_source.outputs.contracts != ''
+        env:
+          EDGAR_KEY_PASSWORD: ${{ env.EDGAR_KEY_PASSWORD }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_CHILD_PIPELINE_ID: ${{ env.EDGAR_CHILD_PIPELINE_ID }}
+          SIGNING_KEY_FILE: ${{ env.SIGNING_KEY_FILE }}
+        run: |
+          echo "${{ steps.changed_files_source.outputs.contracts }}" | while IFS= read -r file_path; do
+            if [ -n "$file_path" ]; then
+              echo "Marking contract source: $file_path"
+              docker run --rm \
+                -v ${{ github.workspace }}:/app \
+                -v /tmp:/tmp \
+                -e EDGAR_KEY_PASSWORD \
+                -e EDGAR_API_KEY \
+                -e EDGAR_CLOUD_API_URL \
+                -e EDGAR_PROJECT_ID \
+                -e EDGAR_CHILD_PIPELINE_ID \
+                -w /app \
+                ghcr.io/m1kc3b/edgar-cli:latest \
+                --json mark \
+                  --project-id "$EDGAR_PROJECT_ID" \
+                  --pipeline-id "$EDGAR_CHILD_PIPELINE_ID" \
+                  --artifact "/app/$file_path" \
+                  --message "Code source for PR #${{ github.event.pull_request.number }} - $file_path" \
+                  --payload-type CodeSource \
+                  --key-path "${{ env.SIGNING_KEY_FILE }}" \
+                  --password "$EDGAR_KEY_PASSWORD"
+            fi
+          done
+
+      - name: Compile Contracts
+        run: npm run compile
+        working-directory: .
+
+      - name: Mark Compiled Bytecode (Child Ledger)
+        env:
+          EDGAR_KEY_PASSWORD: ${{ env.EDGAR_KEY_PASSWORD }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_CHILD_PIPELINE_ID: ${{ env.EDGAR_CHILD_PIPELINE_ID }}
+          SIGNING_KEY_FILE: ${{ env.SIGNING_KEY_FILE }}
+        run: |
+          COMPILED_BYTECODE_PATH="./artifacts/contracts/Counter.sol/Counter.json"
+          if [ -f "$COMPILED_BYTECODE_PATH" ]; then
+            echo "Marking compiled bytecode: $COMPILED_BYTECODE_PATH"
+            docker run --rm \
+              -v ${{ github.workspace }}:/app \
+              -v /tmp:/tmp \
+              -e EDGAR_KEY_PASSWORD \
+              -e EDGAR_API_KEY \
+              -e EDGAR_CLOUD_API_URL \
+              -e EDGAR_PROJECT_ID \
+              -e EDGAR_CHILD_PIPELINE_ID \
+              -w /app \
+              ghcr.io/m1kc3b/edgar-cli:latest \
+              --json mark \
+                --project-id "$EDGAR_PROJECT_ID" \
+                --pipeline-id "$EDGAR_CHILD_PIPELINE_ID" \
+                --artifact "/app/$COMPILED_BYTECODE_PATH" \
+                --message "Compiled bytecode for PR #${{ github.event.pull_request.number }}" \
+                --payload-type Bytecode \
+                --key-path "${{ env.SIGNING_KEY_FILE }}" \
+                --password "$EDGAR_KEY_PASSWORD"
+          else
+            echo "Compiled bytecode file $COMPILED_BYTECODE_PATH not found, skipping mark step."
+            exit 1
+          fi
+
+      - name: Run Unit Tests
+        run: npm run test
+        working-directory: .
+
+      - name: Mark Test Results (Child Ledger)
+        env:
+          EDGAR_KEY_PASSWORD: ${{ env.EDGAR_KEY_PASSWORD }}
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_CHILD_PIPELINE_ID: ${{ env.EDGAR_CHILD_PIPELINE_ID }}
+          SIGNING_KEY_FILE: ${{ env.SIGNING_KEY_FILE }}
+        run: |
+          TEST_REPORT_FILE="test_results_pr_${{ github.event.pull_request.number }}.txt"
+          echo "Tests for PR #${{ github.event.pull_request.number }} passed." > "$TEST_REPORT_FILE"
+          echo "Marking test results: $TEST_REPORT_FILE"
+          docker run --rm \
+            -v ${{ github.workspace }}:/app \
+            -v /tmp:/tmp \
+            -e EDGAR_KEY_PASSWORD \
+            -e EDGAR_API_KEY \
+            -e EDGAR_CLOUD_API_URL \
+            -e EDGAR_PROJECT_ID \
+            -e EDGAR_CHILD_PIPELINE_ID \
+            -w /app \
+            ghcr.io/m1kc3b/edgar-cli:latest \
+            --json mark \
+              --project-id "$EDGAR_PROJECT_ID" \
+              --pipeline-id "$EDGAR_CHILD_PIPELINE_ID" \
+              --artifact "/app/$TEST_REPORT_FILE" \
+              --message "Unit tests for PR #${{ github.event.pull_request.number }}" \
+              --payload-type TestResult \
+              --key-path "${{ env.SIGNING_KEY_FILE }}" \
+              --password "$EDGAR_KEY_PASSWORD"
+
+      - name: Publish Child Ledger
+        env:
+          EDGAR_API_KEY: ${{ env.EDGAR_API_KEY }}
+          EDGAR_CLOUD_API_URL: ${{ env.EDGAR_CLOUD_API_URL }}
+          EDGAR_PROJECT_ID: ${{ env.EDGAR_PROJECT_ID }}
+          EDGAR_CHILD_PIPELINE_ID: ${{ env.EDGAR_CHILD_PIPELINE_ID }}
+        run: |
+          echo "Publishing child ledger..."
+          docker run --rm \
+            -v ${{ github.workspace }}:/app \
+            -e EDGAR_API_KEY \
+            -e EDGAR_CLOUD_API_URL \
+            -e EDGAR_PROJECT_ID \
+            -e EDGAR_PIPELINE_ID="${{ env.EDGAR_CHILD_PIPELINE_ID }}" \
+            -w /app \
+            ghcr.io/m1kc3b/edgar-cli:latest \
+            --json publish \
+              || { echo "Failed to publish child ledger"; exit 1; }
+          echo "Child ledger published successfully."
+
+      - name: Cleanup Edgar Signing Key
+        if: always()
+        run: |
+          rm -f ${{ env.SIGNING_KEY_FILE }}
+          echo "Cleaned up temporary edgar_signing_key.bin"
